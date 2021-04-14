@@ -1,100 +1,104 @@
 package org.pytorch.helloworld;
 
-import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Bundle;
 import android.util.Log;
 import android.widget.ImageView;
-import android.widget.TextView;
 
 import org.pytorch.IValue;
 import org.pytorch.Module;
 import org.pytorch.Tensor;
+import org.pytorch.PyTorchAndroid;
 import org.pytorch.torchvision.TensorImageUtils;
-import org.pytorch.MemoryFormat;
 
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
 
 import androidx.appcompat.app.AppCompatActivity;
 
 public class MainActivity extends AppCompatActivity {
+  private Module module = null;
+  List<float[]> keyFrameFeatures = new ArrayList<float[]>();
+  String[] keyFramePaths = null;
 
   @Override
   protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
     setContentView(R.layout.activity_main);
+    module = PyTorchAndroid.loadModuleFromAsset(getAssets(), "mobile_model.pt");
 
-    Bitmap bitmap = null;
-    Module module = null;
+    Bitmap queryBitmap = null;
     try {
-      // creating bitmap from packaged into app android asset 'image.jpg',
-      // app/src/main/assets/image.jpg
-      bitmap = BitmapFactory.decodeStream(getAssets().open("image.jpg"));
-      // loading serialized torchscript module from packaged into app android asset model.pt,
-      // app/src/model/assets/model.pt
-      module = Module.load(assetFilePath(this, "model.pt"));
+      queryBitmap = BitmapFactory.decodeStream(getAssets().open("queries/IMG_0731.JPG"));
     } catch (IOException e) {
       Log.e("PytorchHelloWorld", "Error reading assets", e);
       finish();
     }
 
-    // showing image on UI
-    ImageView imageView = findViewById(R.id.image);
-    imageView.setImageBitmap(bitmap);
+    ((ImageView) findViewById(R.id.image)).setImageBitmap(queryBitmap);
 
-    // preparing input tensor
-    final Tensor inputTensor = TensorImageUtils.bitmapToFloat32Tensor(bitmap,
-        TensorImageUtils.TORCHVISION_NORM_MEAN_RGB, TensorImageUtils.TORCHVISION_NORM_STD_RGB, MemoryFormat.CHANNELS_LAST);
+    loadKeyFrameFeatures();
+    Log.d("output", "keyFrameFeatures length: " + keyFrameFeatures.size());
 
-    // running the model
-    final Tensor outputTensor = module.forward(IValue.from(inputTensor)).toTensor();
+    float[] queryFeature = runModule(queryBitmap);
 
-    // getting tensor content as java array of floats
-    final float[] scores = outputTensor.getDataAsFloatArray();
+    int closestInd = getClosestKeyFrameIndex(queryFeature);
+    Log.d("output", "closest file is: " + keyFramePaths[closestInd]);
 
-    // searching for the index with maximum score
-    float maxScore = -Float.MAX_VALUE;
-    int maxScoreIdx = -1;
-    for (int i = 0; i < scores.length; i++) {
-      if (scores[i] > maxScore) {
-        maxScore = scores[i];
-        maxScoreIdx = i;
-      }
+    Bitmap closestBitmap = null;
+    try {
+      closestBitmap = BitmapFactory.decodeStream(getAssets().open("key_frames/" + keyFramePaths[closestInd]));
+    } catch (IOException e) {
+      Log.e("PytorchHelloWorld", "Error reading assets", e);
+      finish();
     }
+    ((ImageView) findViewById(R.id.image2)).setImageBitmap(closestBitmap);
 
-    String className = ImageNetClasses.IMAGENET_CLASSES[maxScoreIdx];
-
-    // showing className on UI
-    TextView textView = findViewById(R.id.text);
-    textView.setText(className);
   }
 
-  /**
-   * Copies specified asset to the file in /files app directory and returns this file absolute path.
-   *
-   * @return absolute file path
-   */
-  public static String assetFilePath(Context context, String assetName) throws IOException {
-    File file = new File(context.getFilesDir(), assetName);
-    if (file.exists() && file.length() > 0) {
-      return file.getAbsolutePath();
+  public float[] runModule(Bitmap bitmap){
+    bitmap = Bitmap.createScaledBitmap(bitmap, 640, 480, false);
+    final Tensor inputTensor = TensorImageUtils.bitmapToFloat32Tensor(bitmap,
+            TensorImageUtils.TORCHVISION_NORM_MEAN_RGB, TensorImageUtils.TORCHVISION_NORM_STD_RGB);
+
+    final Tensor outputTensor = module.forward(IValue.from(inputTensor)).toTensor();
+
+    return outputTensor.getDataAsFloatArray();
+  }
+
+  private void loadKeyFrameFeatures() {
+    try {
+      keyFramePaths = getAssets().list("key_frames");
+      for (String keyFramePath: keyFramePaths) {
+        Bitmap bitmap = BitmapFactory.decodeStream(getAssets().open("key_frames/" + keyFramePath));
+        float[] scores = runModule(bitmap);
+        keyFrameFeatures.add(scores);
+      }
+    } catch (IOException e) {
+      Log.e("PytorchHelloWorld", "Error reading keyframes", e);
+      finish();
+    }
+  }
+
+  private int getClosestKeyFrameIndex(float[] queryFeature) {
+    float min_dis = Float.MAX_VALUE;
+    int min_ind = -1;
+
+    for (int i=0; i < keyFrameFeatures.size(); i++) {
+      float[] keyFrameFeature = keyFrameFeatures.get(i);
+      float dis = 0.0f;
+      for (int j=0; j < queryFeature.length; j++) {
+        dis += Math.pow(queryFeature[j] - keyFrameFeature[j], 2);
+      }
+
+      if (dis < min_dis) {
+        min_dis = dis;
+        min_ind = i;
+      }
     }
 
-    try (InputStream is = context.getAssets().open(assetName)) {
-      try (OutputStream os = new FileOutputStream(file)) {
-        byte[] buffer = new byte[4 * 1024];
-        int read;
-        while ((read = is.read(buffer)) != -1) {
-          os.write(buffer, 0, read);
-        }
-        os.flush();
-      }
-      return file.getAbsolutePath();
-    }
+    return min_ind;
   }
 }
