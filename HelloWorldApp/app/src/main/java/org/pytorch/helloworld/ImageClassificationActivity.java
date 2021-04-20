@@ -7,7 +7,9 @@ import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
 import android.media.Image;
+import android.net.Uri;
 import android.os.Bundle;
+import android.provider.MediaStore;
 import android.util.Log;
 import android.view.TextureView;
 import android.view.ViewStub;
@@ -23,19 +25,21 @@ import org.pytorch.torchvision.TensorImageUtils;
 import androidx.annotation.Nullable;
 import androidx.annotation.WorkerThread;
 import androidx.camera.core.ImageProxy;
+import androidx.exifinterface.media.ExifInterface;
 
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.lang.reflect.Type;
 import java.nio.ByteBuffer;
-import java.nio.FloatBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -57,8 +61,6 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
     private Module mModule;
     List<float[]> keyFrameFeatures = new ArrayList<float[]>();
     String[] keyFramePaths = null;
-    private FloatBuffer mInputTensorBuffer;
-    private Tensor mInputTensor;
 
     @Override
     protected int getContentViewLayoutId() {
@@ -75,15 +77,19 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        Bundle b=this.getIntent().getExtras();
+        keyFramePaths = b.getStringArray("KeyFrameUris");
     }
 
     @Override
     protected void applyToUiAnalyzeImageResult(AnalysisResult result) {
         Bitmap closestBitmap = null;
         try {
-            closestBitmap = BitmapFactory.decodeStream(getAssets().open("key_frames/" + keyFramePaths[result.closestInd]));
+            Uri keyFrameUri = Uri.parse(keyFramePaths[result.closestInd]);
+            closestBitmap = rotateBitmap(keyFrameUri);
         } catch (IOException e) {
-            Log.e("PytorchHelloWorld", "Error reading assets", e);
+            Log.e("PyTorchDemo", "Error reading assets", e);
             finish();
         }
         ((ImageView) findViewById(R.id.closestImage)).setImageBitmap(closestBitmap);
@@ -99,10 +105,6 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
 
             loadKeyFrameFeatures();
             Log.d("PyTorchDemo", "Key frame features loaded! len: " + keyFrameFeatures.size());
-
-            mInputTensorBuffer =
-                    Tensor.allocateFloatBuffer(3 * INPUT_TENSOR_WIDTH * INPUT_TENSOR_HEIGHT);
-            mInputTensor = Tensor.fromBlob(mInputTensorBuffer, new long[]{1, 3, INPUT_TENSOR_HEIGHT, INPUT_TENSOR_WIDTH});
         }
 
         Bitmap bitmap = imgToBitmap(image.getImage());
@@ -127,17 +129,32 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
         if (mModule != null) {
             mModule.destroy();
         }
+
+        String filePath = getFilesDir() + "/" + FILE_NAME;
+        File fdelete = new File(filePath);
+        if (fdelete.exists()) {
+            if (fdelete.delete()) {
+                Log.d("PyTorchDemo", "file Deleted: " + filePath);
+            } else {
+                Log.e("PyTorchDemo", "file not Deleted: " + filePath);
+            }
+        } else {
+            Log.e("PyTorchDemo", "file does not exist: " + filePath);
+        }
     }
 
 //    Utils:
     private void loadKeyFrameFeatures() {
         try {
-            keyFramePaths = getAssets().list("key_frames");
             String jsonString = loadFile();
             if (jsonString.equals("")) {
                 for (String keyFramePath : keyFramePaths) {
-                    Bitmap bitmap = BitmapFactory.decodeStream(getAssets().open("key_frames/" + keyFramePath));
+                    Uri keyFrameUri = Uri.parse(keyFramePath);
+                    Bitmap bitmap = rotateBitmap(keyFrameUri);
+
                     bitmap = Bitmap.createScaledBitmap(bitmap, INPUT_TENSOR_WIDTH, INPUT_TENSOR_HEIGHT, false);
+                    Log.d("PyTorchDemo", "file " + keyFramePath + " width: " + bitmap.getWidth() + " height: " + bitmap.getHeight());
+
                     final Tensor inputTensor = TensorImageUtils.bitmapToFloat32Tensor(bitmap,
                             TensorImageUtils.TORCHVISION_NORM_MEAN_RGB, TensorImageUtils.TORCHVISION_NORM_STD_RGB);
 
@@ -155,7 +172,7 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
                 keyFrameFeatures = gson.fromJson(jsonString, listOfMyFloats);
             }
         } catch (IOException e) {
-            Log.e("PytorchHelloWorld", "Error reading keyframes", e);
+            Log.e("PyTorchDemo", "Error reading keyframes", e);
             finish();
         }
 
@@ -250,5 +267,26 @@ public class ImageClassificationActivity extends AbstractCameraXActivity<ImageCl
 
         byte[] imageBytes = out.toByteArray();
         return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+    }
+
+    private Bitmap rotateBitmap(Uri uri) throws IOException {
+        Bitmap bitmap = MediaStore.Images.Media.getBitmap(this.getContentResolver(), uri);
+
+        InputStream in = getContentResolver().openInputStream(uri);
+        ExifInterface exif = new ExifInterface(in);
+        int orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, 1);
+        int orientationDegree = 0;
+        if (orientation == ExifInterface.ORIENTATION_ROTATE_90) {
+            orientationDegree = 90;
+        } else if (orientation ==   ExifInterface.ORIENTATION_ROTATE_180) {
+            orientationDegree = 180;
+        } else if (orientation == ExifInterface.ORIENTATION_ROTATE_270) {
+            orientationDegree = 270;
+        }
+        Matrix matrix = new Matrix();
+        matrix.postRotate(orientationDegree);
+        bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
+
+        return bitmap;
     }
 }
